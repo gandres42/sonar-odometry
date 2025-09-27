@@ -9,6 +9,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <open3d/Open3D.h>
 #include <Eigen/Dense>
+#include "kalman.hpp"
 
 #define SONAR_MAX_DIST 5
 
@@ -20,9 +21,9 @@ struct stampedFrame{
 class SonarOdom {
 private:
   bool visualize = true;
-  ros::NodeHandle n;
+  ros::NodeHandle node;
   ros::Subscriber sonar_sub;
-
+  KalmanFilter filter;
   cv::Ptr<cv::AKAZE> akaze = cv::AKAZE::create(
     cv::AKAZE::DESCRIPTOR_MLDB_UPRIGHT,
     0,
@@ -34,14 +35,55 @@ private:
   );
   std::unique_ptr<cv::BFMatcher> bf = std::make_unique<cv::BFMatcher>(cv::NORM_HAMMING);
   std::deque<stampedFrame> frame_ptr_buffer;
+  int n;
+  int m;
 
 public:
   SonarOdom() {
-    sonar_sub = n.subscribe<sensor_msgs::Image>("/oculus/drawn_sonar", 1, &SonarOdom::sonar_cb, this);
-  }
+    // subscribe to sonar image
+    sonar_sub = node.subscribe<sensor_msgs::Image>("/oculus/drawn_sonar", 1, &SonarOdom::sonar_cb, this);
+  
+    // filter construction
+    n = 6; // Number of states (x, y, z, vx, vy, vz)
+    m = 3; // Number of measurements (vx, vy, vz)
+    double dt = 1.0/10.0; // Time step
 
-  void svd_align() {
+    Eigen::MatrixXd A(n, n); // System dynamics matrix
+    Eigen::MatrixXd C(m, n); // Output matrix
+    Eigen::MatrixXd Q(n, n); // Process noise covariance
+    Eigen::MatrixXd R(m, m); // Measurement noise covariance
+    Eigen::MatrixXd P(n, n); // Estimate error covariance
 
+    A = Eigen::MatrixXd::Zero(n, n);
+    // Position update
+    A(0, 0) = 1; A(0, 3) = dt;
+    A(1, 1) = 1; A(1, 4) = dt;
+    A(2, 2) = 1; A(2, 5) = dt;
+    // Velocity update
+    A(3, 3) = 1;
+    A(4, 4) = 1;
+    A(5, 5) = 1;
+
+    C = Eigen::MatrixXd::Zero(m, n);
+    // Map measurements to velocities (vx, vy, vz)
+    C(0, 3) = 1;
+    C(1, 4) = 1;
+    C(2, 5) = 1;
+
+    Q = Eigen::MatrixXd::Identity(n, n) * 0.05;
+    R = Eigen::MatrixXd::Identity(m, m) * 5;
+    P = Eigen::MatrixXd::Identity(n, n);
+    P.topLeftCorner(3, 3) *= 0.1;      // Position uncertainty
+    P.bottomRightCorner(3, 3) *= 100;  // Velocity uncertainty
+
+    std::cout << "A: \n" << A << std::endl;
+    std::cout << "C: \n" << C << std::endl;
+    std::cout << "Q: \n" << Q << std::endl;
+    std::cout << "R: \n" << R << std::endl;
+    std::cout << "P: \n" << P << std::endl;
+
+    filter = KalmanFilter(dt,A, C, Q, R, P);
+    filter.init();
   }
 
   void sonar_cb(const sensor_msgs::Image::ConstPtr& msg) {
@@ -176,30 +218,31 @@ public:
     Eigen::Vector2f t = centroid_B - R * centroid_A;
 
     // Print result
-    std::cout << "Rotation:\n" << R << std::endl;
-    std::cout << "Translation:\n" << t.transpose() << std::endl;
+    // std::cout << "Rotation:\n" << R << std::endl;
+    // std::cout << "Translation:\n" << t.transpose() << std::endl;
+
+    float dt = (ros::Time::now().toNSec() - prev_time) / 1e9;
+    float vx = t[0] / dt;
+    float vy = t[1] / dt;
+    float vz = 0.0f;
+
+    A = Eigen::MatrixXf::Zero(n, n);
+    // Position update
+    A(0, 0) = 1.0f; A(0, 3) = dt;
+    A(1, 1) = 1.0f; A(1, 4) = dt;
+    A(2, 2) = 1.0f; A(2, 5) = dt;
+    // Velocity update
+    A(3, 3) = 1.0f;
+    A(4, 4) = 1.0f;
+    A(5, 5) = 1.0f;
+
+    Eigen::Vector3f vel_meas;
+    vel_meas << vx, vy, vz;
+    this->filter.update(vel_meas.cast<double>(), double(dt), A.cast<double>());
+
+    // std::cout << "Filter state: " << this->filter.state().transpose() << std::endl;
   }
 
-  //   auto cloud_a = std::make_shared<open3d::geometry::PointCloud>();
-  //   auto cloud_b = std::make_shared<open3d::geometry::PointCloud>();
-
-  //   // Add points to cloud_a (red) and cloud_b (blue)
-  //   for (const auto& pt : matched_pts_a) {
-  //     cloud_a->points_.emplace_back(pt[0], pt[1], 0.0f);
-  //     cloud_a->colors_.emplace_back(1.0, 0.0, 0.0); // Red
-  //   }
-  //   for (const auto& pt : matched_pts_b) {
-  //     cloud_b->points_.emplace_back(pt[0], pt[1], 0.0f);
-  //     cloud_b->colors_.emplace_back(0.0, 0.0, 1.0); // Blue
-  //   }
-
-  //   // ICP alignment
-  //   open3d::pipelines::registration::RegistrationResult result = open3d::pipelines::registration::RegistrationICP(
-  //       *cloud_a, *cloud_b, 0.5, Eigen::Matrix4d::Identity(),
-  //       open3d::pipelines::registration::TransformationEstimationPointToPoint());
-    
-  //   std::cout << result.transformation_ << std::endl;
-  // }
 };
 
 int main(int argc, char **argv)

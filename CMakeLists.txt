@@ -22,7 +22,10 @@ include_directories(
   ${Eigen3_INCLUDE_DIRS}
 )
 
-add_executable(main src/main.cpp)
+# Collect all cpp files in src directory
+file(GLOB SOURCES "src/*.cpp")
+
+add_executable(main ${SOURCES})
 target_link_libraries(main
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
