@@ -11,6 +11,9 @@ find_package(OpenCV REQUIRED)
 find_package(Open3D REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+# Add Fusion library subdirectory
+add_subdirectory(lib/Fusion/Fusion)
+
 catkin_package(
   CATKIN_DEPENDS roscpp sensor_msgs cv_bridge
 )
@@ -20,6 +23,7 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${Open3D_INCLUDE_DIRS}
   ${Eigen3_INCLUDE_DIRS}
+  lib/Fusion/Fusion
 )
 
 # Collect all cpp files in src directory
@@ -31,4 +35,5 @@ target_link_libraries(main
   ${OpenCV_LIBRARIES}
   ${Open3D_LIBRARIES}
   ${Eigen3_LIBRARIES}
+  Fusion
 )

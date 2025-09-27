@@ -1,6 +1,3 @@
-#include "ros/ros.h"
-#include "std_msgs/String.h"
-#include "sensor_msgs/Image.h"
 #include <sstream>
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/core.hpp>
@@ -9,7 +6,15 @@
 #include <cv_bridge/cv_bridge.h>
 #include <open3d/Open3D.h>
 #include <Eigen/Dense>
+#include "ros/ros.h"
+#include "std_msgs/String.h"
+#include "sensor_msgs/Image.h"
+#include "sensor_msgs/Imu.h"
+#include "sensor_msgs/MagneticField.h"
+#include "geometry_msgs/PoseStamped.h"
 #include "kalman.hpp"
+#include "Fusion.h"
+#include "FusionAhrs.h"
 
 #define SONAR_MAX_DIST 5
 
@@ -20,10 +25,17 @@ struct stampedFrame{
 
 class SonarOdom {
 private:
-  bool visualize = true;
+  bool visualize = false;
+
+  // ROS
   ros::NodeHandle node;
   ros::Subscriber sonar_sub;
-  KalmanFilter filter;
+  ros::Subscriber imu_sub;
+  ros::Subscriber mag_sub;
+  ros::Publisher pose_pub;
+
+
+  // cv feature matching
   cv::Ptr<cv::AKAZE> akaze = cv::AKAZE::create(
     cv::AKAZE::DESCRIPTOR_MLDB_UPRIGHT,
     0,
@@ -35,6 +47,15 @@ private:
   );
   std::unique_ptr<cv::BFMatcher> bf = std::make_unique<cv::BFMatcher>(cv::NORM_HAMMING);
   std::deque<stampedFrame> frame_ptr_buffer;
+
+  // rotation fusion filter
+  FusionAhrs ahrs;
+  uint64_t prev_imu_time;
+  FusionVector mag_vector;
+  uint64_t prev_mag_time;
+
+  // position kalman filter
+  KalmanFilter filter;
   int n;
   int m;
 
@@ -42,8 +63,17 @@ public:
   SonarOdom() {
     // subscribe to sonar image
     sonar_sub = node.subscribe<sensor_msgs::Image>("/oculus/drawn_sonar", 1, &SonarOdom::sonar_cb, this);
+    imu_sub = node.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 1, &SonarOdom::imu_cb, this);
+    mag_sub = node.subscribe<sensor_msgs::MagneticField>("/mavros/imu/mag", 1, &SonarOdom::mag_cb, this);
+    pose_pub = node.advertise<geometry_msgs::PoseStamped>("/sianat/pose", 1);
   
-    // filter construction
+    // fusion filter construction
+    FusionAhrsInitialise(&ahrs);
+    prev_imu_time = ros::Time::now().toNSec();
+    mag_vector = {0, 0, 0};
+    prev_mag_time = std::numeric_limits<uint64_t>::max();
+
+    // kalman filter construction
     n = 6; // Number of states (x, y, z, vx, vy, vz)
     m = 3; // Number of measurements (vx, vy, vz)
     double dt = 1.0/10.0; // Time step
@@ -76,14 +106,56 @@ public:
     P.topLeftCorner(3, 3) *= 0.1;      // Position uncertainty
     P.bottomRightCorner(3, 3) *= 100;  // Velocity uncertainty
 
-    std::cout << "A: \n" << A << std::endl;
-    std::cout << "C: \n" << C << std::endl;
-    std::cout << "Q: \n" << Q << std::endl;
-    std::cout << "R: \n" << R << std::endl;
-    std::cout << "P: \n" << P << std::endl;
-
     filter = KalmanFilter(dt,A, C, Q, R, P);
     filter.init();
+  }
+
+  void mag_cb(const sensor_msgs::MagneticField::ConstPtr& msg) {
+    this->prev_mag_time = ros::Time::now().toNSec();
+    this->mag_vector = {float(msg->magnetic_field.x), float(msg->magnetic_field.y), float(msg->magnetic_field.z)};
+  }
+
+  void imu_cb(const sensor_msgs::Imu::ConstPtr& msg) {
+    const FusionVector gyro = {
+      float(msg->angular_velocity.x * 180.0 / M_PI),
+      float(msg->angular_velocity.y * 180.0 / M_PI),
+      float(msg->angular_velocity.z * 180.0 / M_PI)
+    };
+    const FusionVector accel = {
+      float(msg->linear_acceleration.x / 9.80665),
+      float(msg->linear_acceleration.y / 9.80665),
+      float(msg->linear_acceleration.z / 9.80665)
+    };
+    float dt = (ros::Time::now().toNSec() - this->prev_imu_time) / 1e9;
+    
+    // skip magnetometer if it's been too long since reading
+    if (ros::Time::now().toNSec() - 2e8 > this->prev_mag_time) {
+      std::cout << "without mag." << std::endl;
+      FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
+    }
+    else {
+      std::cout << "with mag!" << std::endl;
+      FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_vector, dt);
+    }
+
+
+    this->prev_imu_time = ros::Time::now().toNSec();
+
+    FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+    geometry_msgs::PoseStamped pose_msg;
+    pose_msg.header.stamp = ros::Time::now();
+    pose_msg.header.frame_id = "map";
+    pose_msg.pose.position.x = 0.0;
+    pose_msg.pose.position.y = 0.0;
+    pose_msg.pose.position.z = 0.0;
+    pose_msg.pose.orientation.w = quat.array[0];
+    pose_msg.pose.orientation.x = quat.array[1];
+    pose_msg.pose.orientation.y = quat.array[2];
+    pose_msg.pose.orientation.z = quat.array[3];
+    this->pose_pub.publish(pose_msg);
+
+    const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+    printf("Roll %0.1f, Pitch %0.1f, Yaw %0.1f\n", euler.angle.roll, euler.angle.pitch, euler.angle.yaw);
   }
 
   void sonar_cb(const sensor_msgs::Image::ConstPtr& msg) {
@@ -239,10 +311,7 @@ public:
     Eigen::Vector3f vel_meas;
     vel_meas << vx, vy, vz;
     this->filter.update(vel_meas.cast<double>(), double(dt), A.cast<double>());
-
-    // std::cout << "Filter state: " << this->filter.state().transpose() << std::endl;
   }
-
 };
 
 int main(int argc, char **argv)
