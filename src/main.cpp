@@ -17,6 +17,7 @@
 #include "FusionAhrs.h"
 
 #define SONAR_MAX_DIST 5
+#define SONAR_BUFFER_LENGTH 2
 
 struct stampedFrame{
   cv_bridge::CvImagePtr cv_ptr;
@@ -25,7 +26,7 @@ struct stampedFrame{
 
 class SonarOdom {
 private:
-  bool visualize = false;
+  bool visualize = true;
 
   // ROS
   ros::NodeHandle node;
@@ -104,7 +105,7 @@ public:
     R = Eigen::MatrixXd::Identity(m, m) * 5;
     P = Eigen::MatrixXd::Identity(n, n);
     P.topLeftCorner(3, 3) *= 0.1;      // Position uncertainty
-    P.bottomRightCorner(3, 3) *= 100;  // Velocity uncertainty
+    P.bottomRightCorner(3, 3) *= 10;  // Velocity uncertainty
 
     filter = KalmanFilter(dt,A, C, Q, R, P);
     filter.init();
@@ -130,11 +131,9 @@ public:
     
     // skip magnetometer if it's been too long since reading
     if (ros::Time::now().toNSec() - 2e8 > this->prev_mag_time) {
-      std::cout << "without mag." << std::endl;
       FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
     }
     else {
-      std::cout << "with mag!" << std::endl;
       FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_vector, dt);
     }
 
@@ -145,9 +144,9 @@ public:
     geometry_msgs::PoseStamped pose_msg;
     pose_msg.header.stamp = ros::Time::now();
     pose_msg.header.frame_id = "map";
-    pose_msg.pose.position.x = 0.0;
-    pose_msg.pose.position.y = 0.0;
-    pose_msg.pose.position.z = 0.0;
+    pose_msg.pose.position.x = this->filter.state().transpose()[0];
+    pose_msg.pose.position.y = this->filter.state().transpose()[1];
+    pose_msg.pose.position.z = this->filter.state().transpose()[2];
     pose_msg.pose.orientation.w = quat.array[0];
     pose_msg.pose.orientation.x = quat.array[1];
     pose_msg.pose.orientation.y = quat.array[2];
@@ -155,7 +154,6 @@ public:
     this->pose_pub.publish(pose_msg);
 
     const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
-    printf("Roll %0.1f, Pitch %0.1f, Yaw %0.1f\n", euler.angle.roll, euler.angle.pitch, euler.angle.yaw);
   }
 
   void sonar_cb(const sensor_msgs::Image::ConstPtr& msg) {
@@ -167,14 +165,22 @@ public:
     int target_width = static_cast<int>(cv_ptr->image.cols * (static_cast<float>(target_height) / cv_ptr->image.rows));
     cv::resize(cv_ptr->image, cv_ptr->image, cv::Size(target_width, target_height));
 
-    // pop previous image and time from buffer
-    this->frame_ptr_buffer.push_back({cv_ptr, ros::Time::now().toNSec()});
-    if (this->frame_ptr_buffer.size() < 3) {
+    // add new frame, pop previous frame from buffer
+    this->frame_ptr_buffer.push_back({
+      cv_ptr, 
+      msg->header.stamp.toNSec()
+    });
+    if (this->frame_ptr_buffer.size() < SONAR_BUFFER_LENGTH) {
       return;
     }
     cv_bridge::CvImagePtr prev_image = this->frame_ptr_buffer.at(0).cv_ptr;
     uint64_t prev_time = this->frame_ptr_buffer.at(0).time_ns;
     this->frame_ptr_buffer.pop_front();
+
+    // skip if recieve out-of-order frames
+    if (msg->header.stamp.toNSec() < prev_time) {
+      return;
+    }
     
     // perform AKAZE feature matching
     std::vector<cv::KeyPoint> kp_a;
@@ -209,7 +215,7 @@ public:
 
     if (pts_a.size() >= 4 && pts_b.size() >= 4) {
       std::vector<uchar> inliers_mask;
-      cv::findHomography(pts_a, pts_b, cv::LMEDS, 1, inliers_mask);
+      cv::findHomography(pts_a, pts_b, cv::LMEDS, 8, inliers_mask);
 
       std::vector<std::vector<cv::DMatch>> inlier_matches;
       for (size_t i = 0; i < inliers_mask.size(); ++i) {
@@ -289,11 +295,21 @@ public:
     // Compute translation
     Eigen::Vector2f t = centroid_B - R * centroid_A;
 
-    // Print result
-    // std::cout << "Rotation:\n" << R << std::endl;
-    // std::cout << "Translation:\n" << t.transpose() << std::endl;
+    FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+    Eigen::Quaternionf q(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+    Eigen::Matrix3f rot3d = q.toRotationMatrix();
 
-    float dt = (ros::Time::now().toNSec() - prev_time) / 1e9;
+    // Extract only the rotation around Z axis
+    float yaw = atan2(2.0f * (q.w() * q.z() + q.x() * q.y()),
+              1.0f - 2.0f * (q.y() * q.y() + q.z() * q.z()));
+    Eigen::Matrix2f rot_z;
+    rot_z << cos(yaw), -sin(yaw),
+         sin(yaw),  cos(yaw);
+
+    // Rotate translation t by the Z rotation
+    t = rot_z * t;
+
+    float dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
     float vx = t[0] / dt;
     float vy = t[1] / dt;
     float vz = 0.0f;
@@ -309,7 +325,7 @@ public:
     A(5, 5) = 1.0f;
 
     Eigen::Vector3f vel_meas;
-    vel_meas << vx, vy, vz;
+    vel_meas << vy, -vx, 0;
     this->filter.update(vel_meas.cast<double>(), double(dt), A.cast<double>());
   }
 };
