@@ -101,10 +101,10 @@ public:
     C(1, 4) = 1;
     C(2, 5) = 1;
 
-    Q = Eigen::MatrixXd::Identity(n, n) * 0.05;
-    R = Eigen::MatrixXd::Identity(m, m) * 5;
+    Q = Eigen::MatrixXd::Identity(n, n) * 0.5;
+    R = Eigen::MatrixXd::Identity(m, m) * 10;
     P = Eigen::MatrixXd::Identity(n, n);
-    P.topLeftCorner(3, 3) *= 0.1;      // Position uncertainty
+    P.topLeftCorner(3, 3) *= 0.01;      // Position uncertainty
     P.bottomRightCorner(3, 3) *= 10;  // Velocity uncertainty
 
     filter = KalmanFilter(dt,A, C, Q, R, P);
