@@ -26,22 +26,22 @@ struct stampedFrame{
 
 class SonarOdom {
 private:
-  bool visualize = true;
+  bool visualize = false;
 
   // ROS
   ros::NodeHandle node;
   ros::Subscriber sonar_sub;
   ros::Subscriber imu_sub;
   ros::Subscriber mag_sub;
+  ros::Subscriber pose_sub;
   ros::Publisher pose_pub;
-
 
   // cv feature matching
   cv::Ptr<cv::AKAZE> akaze = cv::AKAZE::create(
     cv::AKAZE::DESCRIPTOR_MLDB_UPRIGHT,
     0,
     3,
-    0.001,
+    0.0005,
     4,
     4,
     cv::KAZE::DIFF_PM_G1
@@ -66,6 +66,7 @@ public:
     sonar_sub = node.subscribe<sensor_msgs::Image>("/oculus/drawn_sonar", 1, &SonarOdom::sonar_cb, this);
     imu_sub = node.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 1, &SonarOdom::imu_cb, this);
     mag_sub = node.subscribe<sensor_msgs::MagneticField>("/mavros/imu/mag", 1, &SonarOdom::mag_cb, this);
+    pose_sub = node.subscribe<geometry_msgs::PoseStamped>("/aruco/pose", 1, &SonarOdom::pose_cb, this);
     pose_pub = node.advertise<geometry_msgs::PoseStamped>("/sianat/pose", 1);
   
     // fusion filter construction
@@ -76,39 +77,44 @@ public:
 
     // kalman filter construction
     n = 6; // Number of states (x, y, z, vx, vy, vz)
-    m = 3; // Number of measurements (vx, vy, vz)
-    double dt = 1.0/10.0; // Time step
+    m = 6; // Number of measurements (vx, vy, vz)
+    double dt = 1.0/10.0;
 
-    Eigen::MatrixXd A(n, n); // System dynamics matrix
-    Eigen::MatrixXd C(m, n); // Output matrix
-    Eigen::MatrixXd Q(n, n); // Process noise covariance
-    Eigen::MatrixXd R(m, m); // Measurement noise covariance
-    Eigen::MatrixXd P(n, n); // Estimate error covariance
+    Eigen::MatrixXd A = (Eigen::MatrixXd(n, n) <<
+      1, 0, 0, dt, 0,  0,
+      0, 1, 0, 0,  dt, 0,
+      0, 0, 1, 0,  0,  dt,
+      0, 0, 0, 1,  0,  0,
+      0, 0, 0, 0,  1,  0,
+      0, 0, 0, 0,  0,  1
+    ).finished();
+    
+    Eigen::MatrixXd C = (Eigen::MatrixXd(m, n) <<
+      1, 0, 0, 0, 0, 0,
+      0, 1, 0, 0, 0, 0,
+      0, 0, 1, 0, 0, 0,
+      0, 0, 0, 1, 0, 0,
+      0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 1
+    ).finished(); // Output matrix
 
-    A = Eigen::MatrixXd::Zero(n, n);
-    // Position update
-    A(0, 0) = 1; A(0, 3) = dt;
-    A(1, 1) = 1; A(1, 4) = dt;
-    A(2, 2) = 1; A(2, 5) = dt;
-    // Velocity update
-    A(3, 3) = 1;
-    A(4, 4) = 1;
-    A(5, 5) = 1;
-
-    C = Eigen::MatrixXd::Zero(m, n);
-    // Map measurements to velocities (vx, vy, vz)
-    C(0, 3) = 1;
-    C(1, 4) = 1;
-    C(2, 5) = 1;
-
-    Q = Eigen::MatrixXd::Identity(n, n) * 0.5;
-    R = Eigen::MatrixXd::Identity(m, m) * 10;
-    P = Eigen::MatrixXd::Identity(n, n);
-    P.topLeftCorner(3, 3) *= 0.01;      // Position uncertainty
-    P.bottomRightCorner(3, 3) *= 10;  // Velocity uncertainty
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * 0.5; // Process noise covariance
+    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * 10; // Measurement noise covariance
+    Eigen::MatrixXd P = (Eigen::MatrixXd(n, n) <<
+      0.01, 0, 0, 0, 0, 0,
+      0, 0.01, 0, 0, 0, 0,
+      0, 0, 0.01, 0, 0, 0,
+      0, 0, 0, 10, 0, 0,
+      0, 0, 0, 0, 10, 0,
+      0, 0, 0, 0, 0, 10
+    ).finished(); // Estimate error covariance
 
     filter = KalmanFilter(dt,A, C, Q, R, P);
     filter.init();
+  }
+
+  void pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+    std::cout << msg->pose.position.x << ", " << msg->pose.position.y << ", " << msg->pose.position.z << std::endl;
   }
 
   void mag_cb(const sensor_msgs::MagneticField::ConstPtr& msg) {
