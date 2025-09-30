@@ -15,6 +15,8 @@
 class KalmanFilter {
 
 public:
+  // Matrices for computation
+  Eigen::MatrixXd A, C, Q, R, P, K, P0;
 
   /**
   * Create a Kalman filter with the specified matrices.
@@ -67,10 +69,6 @@ public:
   double time() { return t; };
 
 private:
-
-  // Matrices for computation
-  Eigen::MatrixXd A, C, Q, R, P, K, P0;
-
   // System dimensions
   int m, n;
 
