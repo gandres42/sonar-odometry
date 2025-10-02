@@ -34,7 +34,7 @@ struct stampedPosition {
 
 class SonarOdom {
 private:
-  bool visualize = false;
+  bool visualize = true;
 
   // ROS
   ros::NodeHandle node;
@@ -369,7 +369,7 @@ public:
     if (pose_dt < 0.1) {
       this->filter.C = this->C;
       Eigen::Vector6d sensor_meas;
-      sensor_meas << -this->aruco_pose.z, this->aruco_pose.x, this->aruco_pose.y, vy, -vx, 0;
+      sensor_meas << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vy, -vx, 0;
       this->filter.update(sensor_meas, dt, A.cast<double>());
     }
     else {
