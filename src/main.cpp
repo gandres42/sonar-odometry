@@ -88,8 +88,8 @@ public:
     pose_sub = node.subscribe<nav_msgs::Odometry>("/docking_control/rov_odom", 1, &SonarOdom::pose_cb, this);
     pose_pub = node.advertise<nav_msgs::Odometry>("/odometry/filtered", 1);
 
-    // aruco tracking setup
-    aruco_pose = {0, 0, 0, 0, ros::Time::now().toNSec()};
+    // aruco tracking setup - x,y,z,yaw,vx,vy,vz,time_ns
+    aruco_pose = {0, 0, 0, 0, 0, 0, 0, ros::Time::now().toNSec()};
 
     // fusion filter construction
     FusionAhrsInitialise(&ahrs);
@@ -153,6 +153,9 @@ public:
       msg->pose.pose.position.y,
       msg->pose.pose.position.z,
       msg->pose.pose.orientation.z,
+      msg->twist.twist.linear.x,
+      msg->twist.twist.linear.y,
+      msg->twist.twist.linear.z,
       ros::Time::now().toNSec()
     };
   }
@@ -206,9 +209,12 @@ public:
     pose_msg.pose.pose.position.x = this->filter.state().transpose()[0];
     pose_msg.pose.pose.position.y = this->filter.state().transpose()[1];
     pose_msg.pose.pose.position.z = this->filter.state().transpose()[2];
-    pose_msg.twist.twist.linear.x = this->filterfilter.state().transpose()[3];
+    pose_msg.twist.twist.linear.x = this->filter.state().transpose()[3];
     pose_msg.twist.twist.linear.y = this->filter.state().transpose()[4];
     pose_msg.twist.twist.linear.z = this->filter.state().transpose()[5];
+    pose_msg.twist.twist.angular.x = gyro.axis.x;
+    pose_msg.twist.twist.angular.y = gyro.axis.y;
+    pose_msg.twist.twist.angular.z = gyro.axis.z;
 
     // rotate pose by compass offset if needed
     if (USE_COMPASS) {
@@ -228,7 +234,6 @@ public:
       FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
       pose_msg.pose.pose.orientation.w = quat.array[0];
       pose_msg.pose.pose.orientation.x = quat.array[1];
-      pose_msg.pose.pose.orientation.y = quat.array[2];
       pose_msg.pose.pose.orientation.y = quat.array[2];
       pose_msg.pose.pose.orientation.z = quat.array[3];
     }
@@ -418,7 +423,7 @@ public:
     // pose_dt = 0.2;
     if (USE_ARUCO && pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
-      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(9) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vx, vy, 0, double(accel_vec.x()), double(accel_vec.y()), double(accel_vec.z())).finished();
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(9) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, this->aruco_pose.vx, this->aruco_pose.vy, this->aruco_pose.vz, double(accel_vec.x()), double(accel_vec.y()), double(accel_vec.z())).finished();
       this->filter.C = this->C;
       this->filter.update(sensor_meas, dt, A);
     }
