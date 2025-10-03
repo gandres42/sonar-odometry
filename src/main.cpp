@@ -20,6 +20,7 @@
 #define SONAR_BUFFER_LENGTH 2
 #define USE_COMPASS true
 #define COMPASS_HEADING 196
+#define USE_ARUCO true
 
 struct stampedFrame {
   cv_bridge::CvImagePtr cv_ptr;
@@ -407,7 +408,7 @@ public:
     // check if position is up to date, if true update filter with position
     float pose_dt = (ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9;
     // pose_dt = 0.2;
-    if (pose_dt < 0.1) {
+    if (USE_ARUCO && pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
       Eigen::VectorXd sensor_meas = (Eigen::VectorXd(9) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vx, vy, 0, double(accel_vec.x()), double(accel_vec.y()), double(accel_vec.z())).finished();
       this->filter.C = this->C;
