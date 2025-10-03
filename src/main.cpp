@@ -96,39 +96,48 @@ public:
     prev_mag_time = std::numeric_limits<uint64_t>::max();
 
     // kalman filter construction
-    n = 6; // Number of states (x, y, z, dx, dy, dz)
-    m = 6; // Number of measurements (px, py, pz, dx, dy, dz)
+    n = 9; // Number of states (x, y, z, vx, vy, vz, ax, ay, ax)
+    m = 9; // Number of measurements (x, y, z, vx, vy, vz, ax, ay, ax)
     double dt = 1.0/10.0;
 
     A = Eigen::MatrixXd(n, n);
     
     C = (Eigen::MatrixXd(m, n) <<
-      1, 0, 0, 0, 0, 0,
-      0, 1, 0, 0, 0, 0,
-      0, 0, 1, 0, 0, 0,
-      0, 0, 0, 1, 0, 0,
-      0, 0, 0, 0, 1, 0,
-      0, 0, 0, 0, 0, 1
+      1, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 1, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 1, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 1, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 1, 0, 0, 0, 0, 
+      0, 0, 0, 0, 0, 1, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 1, 0, 0, 
+      0, 0, 0, 0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix with position
 
     C_positionless= (Eigen::MatrixXd(m, n) <<
-      0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0,
-      0, 0, 0, 1, 0, 0,
-      0, 0, 0, 0, 1, 0,
-      0, 0, 0, 0, 0, 1
+      0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 1, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 1, 0, 0, 0, 0, 
+      0, 0, 0, 0, 0, 1, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 1, 0, 0, 
+      0, 0, 0, 0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix without position
 
     Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * .01; // Process noise covariance
     Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * .02; // Measurement noise covariance
     Eigen::MatrixXd P = (Eigen::MatrixXd(n, n) <<
-      1, 0, 0,  0,  0,  0,
-      0, 1, 0,  0,  0,  0,
-      0, 0, 1,  0,  0,  0,
-      0, 0, 0, .2,  0,  0,
-      0, 0, 0,  0, .2,  0,
-      0, 0, 0,  0,  0, .2
+      1, 0, 0,  0,  0,  0, 0, 0, 0,
+      0, 1, 0,  0,  0,  0, 0, 0, 0,
+      0, 0, 1,  0,  0,  0, 0, 0, 0,
+      0, 0, 0, .2,  0,  0, 0, 0, 0,
+      0, 0, 0,  0, .2,  0, 0, 0, 0,
+      0, 0, 0,  0,  0, .2, 0, 0, 0,
+      0, 0, 0,  0,  0,  0, .3, 0, 0,
+      0, 0, 0,  0,  0,  0, 0, .3, 0,
+      0, 0, 0,  0,  0,  0, 0, 0, .3
     ).finished(); // Estimate error covariance
 
     // initialize filter with no position updates
@@ -275,7 +284,7 @@ public:
       pts_a.push_back(kp_a[match_pair[0].queryIdx].pt);
       pts_b.push_back(kp_b[match_pair[0].trainIdx].pt);
     }
-    if (pts_a.size() >= 8 && pts_b.size() >= 8) {
+    if (pts_a.size() >= 5 && pts_b.size() >= 5) {
       std::vector<uchar> inliers_mask;
       cv::findHomography(pts_a, pts_b, cv::RHO, 1, inliers_mask, 4000, 0.99);
 
@@ -370,22 +379,29 @@ public:
       }
     }
 
-    // t = rot2d * t;
-
+    // calculate velocity
     double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
-    float dx = t[1] / dt;
-    float dy = -t[0] / dt;
+    float vx = t[1] / dt;
+    float vy = -t[0] / dt;
 
-    A = (Eigen::MatrixXd(m, n) <<
-      1, 0, 0, dt, 0, 0,
-      0, 1, 0, 0, dt, 0,
-      0, 0, 1, 0, 0, dt,
-      0, 0, 0, 1, 0, 0,
-      0, 0, 0, 0, 1, 0,
-      0, 0, 0, 0, 0, 1
+    // get acceleration
+    FusionVector accel = FusionAhrsGetLinearAcceleration(&this->ahrs);
+    Eigen::Vector3f accel_vec = (Eigen::Vector3f() << accel.axis.x, accel.axis.y, accel.axis.z).finished();
+    accel_vec = rot3d * accel_vec;
+
+    A = (Eigen::MatrixXd(n, n) <<
+      1, 0, 0, dt, 0, 0, 0.5*dt*dt, 0, 0,
+      0, 1, 0, 0, dt, 0, 0, 0.5*dt*dt, 0,
+      0, 0, 1, 0, 0, dt, 0, 0, 0.5*dt*dt,
+      0, 0, 0, 1, 0, 0, dt, 0, 0,
+      0, 0, 0, 0, 1, 0, 0, dt, 0,
+      0, 0, 0, 0, 0, 1, 0, 0, dt,
+      0, 0, 0, 0, 0, 0, 1, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 1
     ).finished();
 
-    std::cout << "dt: " << dt << ", dx: " << dx << ", dy: " << dy << std::endl;
+    std::cout << "dt: " << dt << ", vx: " << vx << ", vy: " << vy << std::endl;
     float vz = 0.0f;
 
     // check if position is up to date, if true update filter with position
@@ -393,13 +409,13 @@ public:
     // pose_dt = 0.2;
     if (pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
-      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, dx, dy, 0).finished();
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(9) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vx, vy, 0, double(accel_vec.x()), double(accel_vec.y()), double(accel_vec.z())).finished();
       this->filter.C = this->C;
       this->filter.update(sensor_meas, dt, A);
     }
     else {
       std::cout << "not using position" << std::endl;
-      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << 0, 0, 0, dx, dy, 0).finished();
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(9) << 0, 0, 0, vx, vy, 0, double(accel_vec.x()), double(accel_vec.y()), double(accel_vec.z())).finished();
       this->filter.C = this->C_positionless;
       this->filter.update(sensor_meas, dt, A);
     }
