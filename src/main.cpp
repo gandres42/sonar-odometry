@@ -11,6 +11,7 @@
 #include "sensor_msgs/Image.h"
 #include "sensor_msgs/Imu.h"
 #include "sensor_msgs/MagneticField.h"
+#include "nav_msgs/Odometry.h"
 #include "geometry_msgs/PoseStamped.h"
 #include "kalman.hpp"
 #include "Fusion.h"
@@ -18,7 +19,7 @@
 
 #define SONAR_MAX_DIST 5
 #define SONAR_BUFFER_LENGTH 2
-#define USE_COMPASS true
+#define USE_COMPASS false
 #define COMPASS_HEADING 196
 #define USE_ARUCO true
 
@@ -84,9 +85,9 @@ public:
     sonar_sub = node.subscribe<sensor_msgs::Image>("/oculus/drawn_sonar", 1, &SonarOdom::sonar_cb, this);
     imu_sub = node.subscribe<sensor_msgs::Imu>("/mavros/imu/data", 1, &SonarOdom::imu_cb, this);
     mag_sub = node.subscribe<sensor_msgs::MagneticField>("/mavros/imu/mag", 1, &SonarOdom::mag_cb, this);
-    pose_sub = node.subscribe<geometry_msgs::PoseStamped>("/aruco/pose", 1, &SonarOdom::pose_cb, this);
-    pose_pub = node.advertise<geometry_msgs::PoseStamped>("/sianat/pose", 1);
-  
+    pose_sub = node.subscribe<nav_msgs::Odometry>("/docking_control/rov_odom", 1, &SonarOdom::pose_cb, this);
+    pose_pub = node.advertise<nav_msgs::Odometry>("/odometry/filtered", 1);
+
     // aruco tracking setup
     aruco_pose = {0, 0, 0, 0, ros::Time::now().toNSec()};
 
@@ -102,15 +103,15 @@ public:
     double dt = 1.0/10.0;
 
     A = Eigen::MatrixXd(n, n);
-    
+
     C = (Eigen::MatrixXd(m, n) <<
       1, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 1, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 1, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 1, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 1, 0, 0, 0, 0, 
+      0, 0, 0, 0, 1, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 1, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 1, 0, 0, 
+      0, 0, 0, 0, 0, 0, 1, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1, 0,
       0, 0, 0, 0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix with position
@@ -120,9 +121,9 @@ public:
       0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 1, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 1, 0, 0, 0, 0, 
+      0, 0, 0, 0, 1, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 1, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 1, 0, 0, 
+      0, 0, 0, 0, 0, 0, 1, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 1, 0,
       0, 0, 0, 0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix without position
@@ -146,12 +147,12 @@ public:
     filter.init();
   }
 
-  void pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+  void pose_cb(const nav_msgs::Odometry::ConstPtr& msg) {
     this->aruco_pose = {
-      msg->pose.position.x,
-      msg->pose.position.y,
-      msg->pose.position.z,
-      msg->pose.orientation.z,
+      msg->pose.pose.position.x,
+      msg->pose.pose.position.y,
+      msg->pose.pose.position.z,
+      msg->pose.pose.orientation.z,
       ros::Time::now().toNSec()
     };
   }
@@ -196,13 +197,18 @@ public:
     }
     this->prev_imu_time = ros::Time::now().toNSec();
 
+
+
     // publish pose with madgwick and kalman filter states
-    geometry_msgs::PoseStamped pose_msg;
+    nav_msgs::Odometry pose_msg;
     pose_msg.header.stamp = ros::Time::now();
-    pose_msg.header.frame_id = "map";
-    pose_msg.pose.position.x = this->filter.state().transpose()[0];
-    pose_msg.pose.position.y = this->filter.state().transpose()[1];
-    pose_msg.pose.position.z = this->filter.state().transpose()[2];
+    pose_msg.header.frame_id = "map_ned";
+    pose_msg.pose.pose.position.x = this->filter.state().transpose()[0];
+    pose_msg.pose.pose.position.y = this->filter.state().transpose()[1];
+    pose_msg.pose.pose.position.z = this->filter.state().transpose()[2];
+    pose_msg.twist.twist.linear.x = this->filterfilter.state().transpose()[3];
+    pose_msg.twist.twist.linear.y = this->filter.state().transpose()[4];
+    pose_msg.twist.twist.linear.z = this->filter.state().transpose()[5];
 
     // rotate pose by compass offset if needed
     if (USE_COMPASS) {
@@ -213,17 +219,18 @@ public:
       quat.array[1] = q_rotated.x();
       quat.array[2] = q_rotated.y();
       quat.array[3] = q_rotated.z();
-      pose_msg.pose.orientation.w = quat.array[0];
-      pose_msg.pose.orientation.x = quat.array[1];
-      pose_msg.pose.orientation.y = quat.array[2];
-      pose_msg.pose.orientation.z = quat.array[3];
+      pose_msg.pose.pose.orientation.w = quat.array[0];
+      pose_msg.pose.pose.orientation.x = quat.array[1];
+      pose_msg.pose.pose.orientation.y = quat.array[2];
+      pose_msg.pose.pose.orientation.z = quat.array[3];
     }
     else {
       FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
-      pose_msg.pose.orientation.w = quat.array[0];
-      pose_msg.pose.orientation.x = quat.array[1];
-      pose_msg.pose.orientation.y = quat.array[2];
-      pose_msg.pose.orientation.z = quat.array[3];
+      pose_msg.pose.pose.orientation.w = quat.array[0];
+      pose_msg.pose.pose.orientation.x = quat.array[1];
+      pose_msg.pose.pose.orientation.y = quat.array[2];
+      pose_msg.pose.pose.orientation.y = quat.array[2];
+      pose_msg.pose.pose.orientation.z = quat.array[3];
     }
 
     this->pose_pub.publish(pose_msg);
@@ -231,7 +238,7 @@ public:
 
   void sonar_cb(const sensor_msgs::Image::ConstPtr& msg) {
     cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::MONO8);
-    
+
     // image preprocessing
     cv::flip(cv_ptr->image, cv_ptr->image, 0);
     cv::GaussianBlur(cv_ptr->image, cv_ptr->image, cv::Size(3, 3), 3);
@@ -241,7 +248,7 @@ public:
 
     // add new frame, pop previous frame from buffer
     this->frame_ptr_buffer.push_back({
-      cv_ptr, 
+      cv_ptr,
       msg->header.stamp.toNSec()
     });
     if (this->frame_ptr_buffer.size() < SONAR_BUFFER_LENGTH) {
@@ -255,7 +262,7 @@ public:
     if (msg->header.stamp.toNSec() < prev_time) {
       return;
     }
-    
+
     // perform AKAZE feature matching
     std::vector<cv::KeyPoint> kp_a;
     cv::Mat des_a;
@@ -276,7 +283,7 @@ public:
 
       if (m->distance < (0.25 * n->distance)) {
         matches.push_back(prelim_matches[i]);
-      }    
+      }
     }
 
     // perform RANSAC to eliminate bad matches
@@ -299,7 +306,7 @@ public:
     }
 
     // matches visualization
-    if (this->visualize && !matches.empty()) {
+    if (this->visualize) {
       cv::Mat img_matches;
       std::vector<cv::DMatch> flat_matches;
       for (const auto& m : matches) {
@@ -320,7 +327,7 @@ public:
     std::vector<std::array<float, 2>> matched_pts_a;
     std::vector<std::array<float, 2>> matched_pts_b;
     for (int i = 0; i < matches.size(); i++) {
-      
+
       matched_pts_a.push_back({
         (kp_a[matches[i][0].queryIdx].pt.x - (cv_ptr->image.cols / 2)) / 100,
         (kp_a[matches[i][0].queryIdx].pt.y) / 100
@@ -407,6 +414,7 @@ public:
 
     // check if position is up to date, if true update filter with position
     float pose_dt = (ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9;
+    std::cout << "pose dt: " << pose_dt << std::endl;
     // pose_dt = 0.2;
     if (USE_ARUCO && pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
