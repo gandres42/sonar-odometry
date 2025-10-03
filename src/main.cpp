@@ -52,7 +52,7 @@ private:
     cv::AKAZE::DESCRIPTOR_MLDB_UPRIGHT,
     0,
     3,
-    0.002,
+    0.001,
     4,
     4,
     cv::KAZE::DIFF_PM_G1
@@ -100,14 +100,7 @@ public:
     m = 6; // Number of measurements (px, py, pz, dx, dy, dz)
     double dt = 1.0/10.0;
 
-    Eigen::MatrixXd A = (Eigen::MatrixXd(n, n) <<
-      1, 0, 0, 1, 0, 0,
-      0, 1, 0, 0, 1, 0,
-      0, 0, 1, 0, 0, 1,
-      0, 0, 0, 1, 0, 0, 
-      0, 0, 0, 0, 1, 0,
-      0, 0, 0, 0, 0, 1
-    ).finished();
+    A = Eigen::MatrixXd(n, n);
     
     C = (Eigen::MatrixXd(m, n) <<
       1, 0, 0, 0, 0, 0,
@@ -127,15 +120,15 @@ public:
       0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix without position
 
-    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * 1; // Process noise covariance
-    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * 2; // Measurement noise covariance
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * .01; // Process noise covariance
+    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * .02; // Measurement noise covariance
     Eigen::MatrixXd P = (Eigen::MatrixXd(n, n) <<
       1, 0, 0,  0,  0,  0,
       0, 1, 0,  0,  0,  0,
       0, 0, 1,  0,  0,  0,
-      0, 0, 0, .75,  0,  0,
-      0, 0, 0,  0, .75,  0,
-      0, 0, 0,  0,  0, .75
+      0, 0, 0, .2,  0,  0,
+      0, 0, 0,  0, .2,  0,
+      0, 0, 0,  0,  0, .2
     ).finished(); // Estimate error covariance
 
     // initialize filter with no position updates
@@ -231,6 +224,7 @@ public:
     
     // image preprocessing
     cv::flip(cv_ptr->image, cv_ptr->image, 0);
+    cv::GaussianBlur(cv_ptr->image, cv_ptr->image, cv::Size(3, 3), 3);
     int target_height = 100 * SONAR_MAX_DIST;
     int target_width = static_cast<int>(cv_ptr->image.cols * (static_cast<float>(target_height) / cv_ptr->image.rows));
     cv::resize(cv_ptr->image, cv_ptr->image, cv::Size(target_width, target_height));
@@ -256,7 +250,6 @@ public:
     std::vector<cv::KeyPoint> kp_a;
     cv::Mat des_a;
     this->akaze->detectAndCompute(cv_ptr->image, cv::noArray(), kp_a, des_a);
-    
     std::vector<cv::KeyPoint> kp_b;
     cv::Mat des_b;
     this->akaze->detectAndCompute(prev_image->image, cv::noArray(), kp_b, des_b);
@@ -271,7 +264,7 @@ public:
       cv::DMatch* m = &prelim_matches[i][0];
       cv::DMatch* n = &prelim_matches[i][1];
 
-      if (m->distance < (0.75 * n->distance)) {
+      if (m->distance < (0.25 * n->distance)) {
         matches.push_back(prelim_matches[i]);
       }    
     }
@@ -294,8 +287,6 @@ public:
       }
       matches = inlier_matches;
     }
-
-    std::cout << matches.size() << std::endl;
 
     // matches visualization
     if (this->visualize && !matches.empty()) {
@@ -338,6 +329,27 @@ public:
       matched_B(1, i) = matched_pts_b[i][1];
     }
 
+    // get current ahrs rotation and extract only rotation about z
+    FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+    Eigen::Quaternionf q;
+    if (USE_COMPASS) {
+      Eigen::AngleAxisf compass_rot(float(360 - COMPASS_HEADING) * M_PI / 180.0f, Eigen::Vector3f::UnitZ());
+      q = compass_rot * Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+    }
+    else {
+      q = Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+    }
+    Eigen::Matrix3f rot3d = q.toRotationMatrix();
+
+    // rotate translation to match global z rotation
+    auto euler = rot3d.eulerAngles(0, 1, 2);
+    float yaw = euler[2];
+    Eigen::Matrix2f rot2d;
+    rot2d << cos(yaw), -sin(yaw), sin(yaw), cos(yaw);
+
+    matched_A = rot2d * matched_A;
+    matched_B = rot2d * matched_B;
+
     // SVD with default of no translation in degenerate cases
     Eigen::Vector2f t = (Eigen::Vector2f() << 0, 0).finished();
     if (matched_A.cols() > 4 || matched_B.cols() > 4) {
@@ -358,44 +370,38 @@ public:
       }
     }
 
-    // get current ahrs rotation and extract only rotation about z
-    FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
-    Eigen::Quaternionf q;
-    if (USE_COMPASS) {
-      q = Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);  
-    }
-    else {
-      Eigen::AngleAxisf compass_rot(float(360 - COMPASS_HEADING) * M_PI / 180.0f, Eigen::Vector3f::UnitZ());
-      q = compass_rot * Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
-    }
-    Eigen::Matrix3f rot3d = q.toRotationMatrix();
+    // t = rot2d * t;
 
-    // rotate translation to match global z rotation
-    float yaw = atan2(2.0f * (q.w() * q.z() + q.x() * q.y()),
-               1.0f - 2.0f * (q.y() * q.y() + q.z() * q.z()));
-    Eigen::Matrix2f rot_z = (Eigen::Matrix2f() << cos(yaw), -sin(yaw), sin(yaw), cos(yaw)).finished();
-    t = rot_z * t;
+    double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
+    float dx = t[1] / dt;
+    float dy = -t[0] / dt;
 
-    // double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
-    float dx = -t[1];
-    float dy = t[0];
+    A = (Eigen::MatrixXd(m, n) <<
+      1, 0, 0, dt, 0, 0,
+      0, 1, 0, 0, dt, 0,
+      0, 0, 1, 0, 0, dt,
+      0, 0, 0, 1, 0, 0,
+      0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 1
+    ).finished();
 
-    std::cout << "dx: " << dx << ", dy: " << dy << std::endl;
+    std::cout << "dt: " << dt << ", dx: " << dx << ", dy: " << dy << std::endl;
     float vz = 0.0f;
 
     // check if position is up to date, if true update filter with position
     float pose_dt = (ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9;
+    // pose_dt = 0.2;
     if (pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
       Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, dx, dy, 0).finished();
       this->filter.C = this->C;
-      this->filter.update(sensor_meas);
+      this->filter.update(sensor_meas, dt, A);
     }
     else {
       std::cout << "not using position" << std::endl;
       Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << 0, 0, 0, dx, dy, 0).finished();
       this->filter.C = this->C_positionless;
-      this->filter.update(sensor_meas);
+      this->filter.update(sensor_meas, dt, A);
     }
 
     std::cout << this->filter.state()[0] << ", " << this->filter.state()[1] << ", " << this->filter.state()[0] << std::endl << "\n";
