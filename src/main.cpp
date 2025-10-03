@@ -17,7 +17,9 @@
 #include "FusionAhrs.h"
 
 #define SONAR_MAX_DIST 5
-#define SONAR_BUFFER_LENGTH 3
+#define SONAR_BUFFER_LENGTH 2
+#define USE_COMPASS true
+#define COMPASS_HEADING 196
 
 struct stampedFrame {
   cv_bridge::CvImagePtr cv_ptr;
@@ -35,6 +37,7 @@ struct stampedPosition {
 class SonarOdom {
 private:
   bool visualize = true;
+  bool heading_set = false;
 
   // ROS
   ros::NodeHandle node;
@@ -49,7 +52,7 @@ private:
     cv::AKAZE::DESCRIPTOR_MLDB_UPRIGHT,
     0,
     3,
-    0.0005,
+    0.002,
     4,
     4,
     cv::KAZE::DIFF_PM_G1
@@ -69,6 +72,7 @@ private:
   int m;
   Eigen::MatrixXd C;
   Eigen::MatrixXd C_positionless;
+  Eigen::MatrixXd A;
 
   // aruco tracking
   stampedPosition aruco_pose;
@@ -92,17 +96,17 @@ public:
     prev_mag_time = std::numeric_limits<uint64_t>::max();
 
     // kalman filter construction
-    n = 6; // Number of states (x, y, z, vx, vy, vz)
-    m = 6; // Number of measurements (px, py, pz, vx, vy, vz)
+    n = 6; // Number of states (x, y, z, dx, dy, dz)
+    m = 6; // Number of measurements (px, py, pz, dx, dy, dz)
     double dt = 1.0/10.0;
 
     Eigen::MatrixXd A = (Eigen::MatrixXd(n, n) <<
-      1, 0, 0, dt, 0,  0,
-      0, 1, 0, 0,  dt, 0,
-      0, 0, 1, 0,  0,  dt,
-      0, 0, 0, 1,  0,  0,
-      0, 0, 0, 0,  1,  0,
-      0, 0, 0, 0,  0,  1
+      1, 0, 0, 1, 0, 0,
+      0, 1, 0, 0, 1, 0,
+      0, 0, 1, 0, 0, 1,
+      0, 0, 0, 1, 0, 0, 
+      0, 0, 0, 0, 1, 0,
+      0, 0, 0, 0, 0, 1
     ).finished();
     
     C = (Eigen::MatrixXd(m, n) <<
@@ -112,7 +116,7 @@ public:
       0, 0, 0, 1, 0, 0,
       0, 0, 0, 0, 1, 0,
       0, 0, 0, 0, 0, 1
-    ).finished(); // Output matrix
+    ).finished(); // measurement mapping matrix with position
 
     C_positionless= (Eigen::MatrixXd(m, n) <<
       0, 0, 0, 0, 0, 0,
@@ -121,32 +125,30 @@ public:
       0, 0, 0, 1, 0, 0,
       0, 0, 0, 0, 1, 0,
       0, 0, 0, 0, 0, 1
-    ).finished(); // Output matrix
+    ).finished(); // measurement mapping matrix without position
 
-    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * 0.5; // Process noise covariance
-    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * 10; // Measurement noise covariance
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(n, n) * 1; // Process noise covariance
+    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m) * 2; // Measurement noise covariance
     Eigen::MatrixXd P = (Eigen::MatrixXd(n, n) <<
-      1, 0, 0, 0, 0, 0,
-      0, 1, 0, 0, 0, 0,
-      0, 0, 1, 0, 0, 0,
-      0, 0, 0, .5, 0, 0,
-      0, 0, 0, 0, .5, 0,
-      0, 0, 0, 0, 0, .5
+      1, 0, 0,  0,  0,  0,
+      0, 1, 0,  0,  0,  0,
+      0, 0, 1,  0,  0,  0,
+      0, 0, 0, .75,  0,  0,
+      0, 0, 0,  0, .75,  0,
+      0, 0, 0,  0,  0, .75
     ).finished(); // Estimate error covariance
 
-    filter = KalmanFilter(dt,A, C_positionless, Q, R, P);
+    // initialize filter with no position updates
+    filter = KalmanFilter(dt, A, C_positionless, Q, R, P);
     filter.init();
   }
 
   void pose_cb(const geometry_msgs::PoseStamped::ConstPtr& msg) {
-    float yaw = atan2(2.0f * (msg->pose.orientation.w * msg->pose.orientation.x + msg->pose.orientation.y * msg->pose.orientation.z),
-        1.0f - 2.0f * (msg->pose.orientation.x * msg->pose.orientation.x + msg->pose.orientation.y * msg->pose.orientation.y));
-    yaw = yaw * 180.0f / M_PI;
     this->aruco_pose = {
       msg->pose.position.x,
       msg->pose.position.y,
       msg->pose.position.z,
-      yaw,
+      msg->pose.orientation.z,
       ros::Time::now().toNSec()
     };
   }
@@ -168,45 +170,60 @@ public:
       float(msg->linear_acceleration.z / 9.80665)
     };
     float dt = (ros::Time::now().toNSec() - this->prev_imu_time) / 1e9;
-    
-    // skip magnetometer if it's been too long since reading
 
-    bool pose_fresh = ((ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9) < 0.1;
-    bool mag_fresh = ros::Time::now().toNSec() - 2e8 > this->prev_mag_time;
-    // if (mag_fresh && pose_fresh) {
-    //   FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
-    // }
-    // else if (pose_fresh) {
-
-    // }
-    if (mag_fresh) {
-      FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
+    // update IMU with either magnetometer or aruco as external heading
+    if (USE_COMPASS) {
+      bool mag_fresh = ros::Time::now().toNSec() - 2e8 > this->prev_mag_time;
+      if (mag_fresh) {
+        FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
+      }
+      else {
+        FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_vector, dt);
+      }
     }
     else {
-      FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_vector, dt);
+      bool pose_fresh = ((ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9) < 0.15;
+      if (pose_fresh) {
+        float aruco_yaw_deg = this->aruco_pose.yaw * 180.0f / M_PI;
+        FusionAhrsUpdateExternalHeading(&this->ahrs, gyro, accel, aruco_yaw_deg, dt);
+      }
+      else {
+        FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, dt);
+      }
     }
-
-    // if (pose_fresh) {
-    //   std::cout << this->aruco_pose.yaw << std::endl;
-    //   FusionAhrsSetHeading(&this->ahrs, this->aruco_pose.yaw);
-    // }
-
     this->prev_imu_time = ros::Time::now().toNSec();
 
-    FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+    // publish pose with madgwick and kalman filter states
     geometry_msgs::PoseStamped pose_msg;
     pose_msg.header.stamp = ros::Time::now();
     pose_msg.header.frame_id = "map";
     pose_msg.pose.position.x = this->filter.state().transpose()[0];
     pose_msg.pose.position.y = this->filter.state().transpose()[1];
     pose_msg.pose.position.z = this->filter.state().transpose()[2];
-    pose_msg.pose.orientation.w = quat.array[0];
-    pose_msg.pose.orientation.x = quat.array[1];
-    pose_msg.pose.orientation.y = quat.array[2];
-    pose_msg.pose.orientation.z = quat.array[3];
-    this->pose_pub.publish(pose_msg);
 
-    const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+    // rotate pose by compass offset if needed
+    if (USE_COMPASS) {
+      FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+      Eigen::AngleAxisf compass_rot(float(360 - COMPASS_HEADING) * M_PI / 180.0f, Eigen::Vector3f::UnitZ());
+      Eigen::Quaternionf q_rotated = compass_rot * Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+      quat.array[0] = q_rotated.w();
+      quat.array[1] = q_rotated.x();
+      quat.array[2] = q_rotated.y();
+      quat.array[3] = q_rotated.z();
+      pose_msg.pose.orientation.w = quat.array[0];
+      pose_msg.pose.orientation.x = quat.array[1];
+      pose_msg.pose.orientation.y = quat.array[2];
+      pose_msg.pose.orientation.z = quat.array[3];
+    }
+    else {
+      FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
+      pose_msg.pose.orientation.w = quat.array[0];
+      pose_msg.pose.orientation.x = quat.array[1];
+      pose_msg.pose.orientation.y = quat.array[2];
+      pose_msg.pose.orientation.z = quat.array[3];
+    }
+
+    this->pose_pub.publish(pose_msg);
   }
 
   void sonar_cb(const sensor_msgs::Image::ConstPtr& msg) {
@@ -265,10 +282,9 @@ public:
       pts_a.push_back(kp_a[match_pair[0].queryIdx].pt);
       pts_b.push_back(kp_b[match_pair[0].trainIdx].pt);
     }
-
-    if (pts_a.size() >= 4 && pts_b.size() >= 4) {
+    if (pts_a.size() >= 8 && pts_b.size() >= 8) {
       std::vector<uchar> inliers_mask;
-      cv::findHomography(pts_a, pts_b, cv::LMEDS, 8, inliers_mask);
+      cv::findHomography(pts_a, pts_b, cv::RHO, 1, inliers_mask, 4000, 0.99);
 
       std::vector<std::vector<cv::DMatch>> inlier_matches;
       for (size_t i = 0; i < inliers_mask.size(); ++i) {
@@ -278,6 +294,8 @@ public:
       }
       matches = inlier_matches;
     }
+
+    std::cout << matches.size() << std::endl;
 
     // matches visualization
     if (this->visualize && !matches.empty()) {
@@ -311,73 +329,76 @@ public:
         (kp_b[matches[i][0].trainIdx].pt.y) / 100
       });
     }
-
-    // Convert to Eigen matrices
-    Eigen::MatrixXf A(2, matched_pts_a.size());
-    Eigen::MatrixXf B(2, matched_pts_b.size());
+    Eigen::MatrixXf matched_A(2, matched_pts_a.size());
+    Eigen::MatrixXf matched_B(2, matched_pts_b.size());
     for (size_t i = 0; i < matched_pts_a.size(); ++i) {
-      A(0, i) = matched_pts_a[i][0];
-      A(1, i) = matched_pts_a[i][1];
-      B(0, i) = matched_pts_b[i][0];
-      B(1, i) = matched_pts_b[i][1];
+      matched_A(0, i) = matched_pts_a[i][0];
+      matched_A(1, i) = matched_pts_a[i][1];
+      matched_B(0, i) = matched_pts_b[i][0];
+      matched_B(1, i) = matched_pts_b[i][1];
     }
 
-    // align with SVD
-    Eigen::Vector2f centroid_A = A.rowwise().mean();
-    Eigen::Vector2f centroid_B = B.rowwise().mean();
-    Eigen::MatrixXf AA = A.colwise() - centroid_A;
-    Eigen::MatrixXf BB = B.colwise() - centroid_B;
-    Eigen::Matrix2f H = AA * BB.transpose();
-    Eigen::JacobiSVD<Eigen::Matrix2f> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Eigen::Matrix2f R = svd.matrixV() * svd.matrixU().transpose();
-    if (R.determinant() < 0) {
-      Eigen::Matrix2f V = svd.matrixV();
-      V.col(1) *= -1;
-      R = V * svd.matrixU().transpose();
+    // SVD with default of no translation in degenerate cases
+    Eigen::Vector2f t = (Eigen::Vector2f() << 0, 0).finished();
+    if (matched_A.cols() > 4 || matched_B.cols() > 4) {
+      Eigen::Vector2f centroid_A = matched_A.rowwise().mean();
+      Eigen::Vector2f centroid_B = matched_B.rowwise().mean();
+      Eigen::MatrixXf AA = matched_A.colwise() - centroid_A;
+      Eigen::MatrixXf BB = matched_B.colwise() - centroid_B;
+      Eigen::Matrix2f H = AA * BB.transpose();
+      if (!H.isZero(1e-6)) {
+        Eigen::JacobiSVD<Eigen::Matrix2f> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Eigen::Matrix2f R = svd.matrixV() * svd.matrixU().transpose();
+        if (R.determinant() < 0) {
+          Eigen::Matrix2f V = svd.matrixV();
+          V.col(1) *= -1;
+          R = V * svd.matrixU().transpose();
+        }
+        t = centroid_B - R * centroid_A;
+      }
     }
-    Eigen::Vector2f t = centroid_B - R * centroid_A;
 
     // get current ahrs rotation and extract only rotation about z
     FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
-    Eigen::Quaternionf q(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+    Eigen::Quaternionf q;
+    if (USE_COMPASS) {
+      q = Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);  
+    }
+    else {
+      Eigen::AngleAxisf compass_rot(float(360 - COMPASS_HEADING) * M_PI / 180.0f, Eigen::Vector3f::UnitZ());
+      q = compass_rot * Eigen::Quaternionf(quat.array[0], quat.array[1], quat.array[2], quat.array[3]);
+    }
     Eigen::Matrix3f rot3d = q.toRotationMatrix();
 
     // rotate translation to match global z rotation
     float yaw = atan2(2.0f * (q.w() * q.z() + q.x() * q.y()),
-              1.0f - 2.0f * (q.y() * q.y() + q.z() * q.z()));
-    Eigen::Matrix2f rot_z;
-    rot_z << cos(yaw), -sin(yaw), sin(yaw), cos(yaw);
+               1.0f - 2.0f * (q.y() * q.y() + q.z() * q.z()));
+    Eigen::Matrix2f rot_z = (Eigen::Matrix2f() << cos(yaw), -sin(yaw), sin(yaw), cos(yaw)).finished();
     t = rot_z * t;
 
-    double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
-    float vx = t[0] / dt;
-    float vy = t[1] / dt;
+    // double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
+    float dx = -t[1];
+    float dy = t[0];
+
+    std::cout << "dx: " << dx << ", dy: " << dy << std::endl;
     float vz = 0.0f;
 
-    // filter dynamics matrix
-    A = Eigen::MatrixXf::Zero(n, n);
-    A(0, 0) = 1.0f; A(0, 3) = dt;
-    A(1, 1) = 1.0f; A(1, 4) = dt;
-    A(2, 2) = 1.0f; A(2, 5) = dt;
-    A(3, 3) = 1.0f;
-    A(4, 4) = 1.0f;
-    A(5, 5) = 1.0f;
-
-    // check if position is up to date, if true update with position
+    // check if position is up to date, if true update filter with position
     float pose_dt = (ros::Time::now().toNSec() - this->aruco_pose.time_ns) / 1e9;
-    // pose_dt = 0.2;
     if (pose_dt < 0.1) {
+      std::cout << "using position" << std::endl;
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, dx, dy, 0).finished();
       this->filter.C = this->C;
-      Eigen::Vector6d sensor_meas;
-      sensor_meas << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vy, -vx, 0;
-      this->filter.update(sensor_meas, dt, A.cast<double>());
+      this->filter.update(sensor_meas);
     }
     else {
+      std::cout << "not using position" << std::endl;
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << 0, 0, 0, dx, dy, 0).finished();
       this->filter.C = this->C_positionless;
-      Eigen::Vector6d sensor_meas;
-      sensor_meas << 0, 0, 0, vy, vx, 0;
-      this->filter.update(sensor_meas, dt, A.cast<double>());
+      this->filter.update(sensor_meas);
     }
+
+    std::cout << this->filter.state()[0] << ", " << this->filter.state()[1] << ", " << this->filter.state()[0] << std::endl << "\n";
   }
 };
 
