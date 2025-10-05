@@ -20,10 +20,7 @@
 #define SONAR_BUFFER_LENGTH 2
 #define USE_COMPASS true
 #define COMPASS_HEADING 196
-<<<<<<< Updated upstream
-=======
 #define USE_ARUCO false
->>>>>>> Stashed changes
 
 struct stampedFrame {
   cv_bridge::CvImagePtr cv_ptr;
@@ -100,14 +97,6 @@ public:
     prev_mag_time = std::numeric_limits<uint64_t>::max();
 
     // kalman filter construction
-<<<<<<< Updated upstream
-    n = 6; // Number of states (x, y, z, dx, dy, dz)
-    m = 6; // Number of measurements (px, py, pz, dx, dy, dz)
-    double dt = 1.0/10.0;
-
-    A = Eigen::MatrixXd(n, n);
-    
-=======
     double dt = 1.0/10.0;
 
     A = Eigen::MatrixXd(n, n);
@@ -116,7 +105,6 @@ public:
     n = 6; // Number of states (x, y, z, vx, vy, vz)
     m = 6; // Number of measurements (x, y, z, vx, vy, vz)
 
->>>>>>> Stashed changes
     C = (Eigen::MatrixXd(m, n) <<
       1, 0, 0, 0, 0, 0,
       0, 1, 0, 0, 0, 0,
@@ -126,11 +114,7 @@ public:
       0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix with position
 
-<<<<<<< Updated upstream
-    C_positionless= (Eigen::MatrixXd(m, n) <<
-=======
     C_positionless = (Eigen::MatrixXd(m, n) <<
->>>>>>> Stashed changes
       0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0,
