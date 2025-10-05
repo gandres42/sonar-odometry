@@ -20,6 +20,10 @@
 #define SONAR_BUFFER_LENGTH 2
 #define USE_COMPASS true
 #define COMPASS_HEADING 196
+<<<<<<< Updated upstream
+=======
+#define USE_ARUCO false
+>>>>>>> Stashed changes
 
 struct stampedFrame {
   cv_bridge::CvImagePtr cv_ptr;
@@ -67,9 +71,9 @@ private:
   uint64_t prev_mag_time;
 
   // position kalman filter
-  KalmanFilter filter;
   int n;
   int m;
+  KalmanFilter filter;
   Eigen::MatrixXd C;
   Eigen::MatrixXd C_positionless;
   Eigen::MatrixXd A;
@@ -96,12 +100,23 @@ public:
     prev_mag_time = std::numeric_limits<uint64_t>::max();
 
     // kalman filter construction
+<<<<<<< Updated upstream
     n = 6; // Number of states (x, y, z, dx, dy, dz)
     m = 6; // Number of measurements (px, py, pz, dx, dy, dz)
     double dt = 1.0/10.0;
 
     A = Eigen::MatrixXd(n, n);
     
+=======
+    double dt = 1.0/10.0;
+
+    A = Eigen::MatrixXd(n, n);
+
+    // Remove linear acceleration as a state: n = 6, m = 6
+    n = 6; // Number of states (x, y, z, vx, vy, vz)
+    m = 6; // Number of measurements (x, y, z, vx, vy, vz)
+
+>>>>>>> Stashed changes
     C = (Eigen::MatrixXd(m, n) <<
       1, 0, 0, 0, 0, 0,
       0, 1, 0, 0, 0, 0,
@@ -111,7 +126,11 @@ public:
       0, 0, 0, 0, 0, 1
     ).finished(); // measurement mapping matrix with position
 
+<<<<<<< Updated upstream
     C_positionless= (Eigen::MatrixXd(m, n) <<
+=======
+    C_positionless = (Eigen::MatrixXd(m, n) <<
+>>>>>>> Stashed changes
       0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0,
@@ -189,10 +208,13 @@ public:
     // publish pose with madgwick and kalman filter states
     geometry_msgs::PoseStamped pose_msg;
     pose_msg.header.stamp = ros::Time::now();
-    pose_msg.header.frame_id = "map";
-    pose_msg.pose.position.x = this->filter.state().transpose()[0];
-    pose_msg.pose.position.y = this->filter.state().transpose()[1];
-    pose_msg.pose.position.z = this->filter.state().transpose()[2];
+    pose_msg.header.frame_id = "map_ned";
+    pose_msg.pose.pose.position.x = this->filter.state().transpose()[0];
+    pose_msg.pose.pose.position.y = this->filter.state().transpose()[1];
+    pose_msg.pose.pose.position.z = this->filter.state().transpose()[2];
+    pose_msg.twist.twist.linear.x = this->filter.state().transpose()[3];
+    pose_msg.twist.twist.linear.y = this->filter.state().transpose()[4];
+    pose_msg.twist.twist.linear.z = this->filter.state().transpose()[5];
 
     // rotate pose by compass offset if needed
     if (USE_COMPASS) {
@@ -210,10 +232,10 @@ public:
     }
     else {
       FusionQuaternion quat = FusionAhrsGetQuaternion(&this->ahrs);
-      pose_msg.pose.orientation.w = quat.array[0];
-      pose_msg.pose.orientation.x = quat.array[1];
-      pose_msg.pose.orientation.y = quat.array[2];
-      pose_msg.pose.orientation.z = quat.array[3];
+      pose_msg.pose.pose.orientation.w = quat.array[0];
+      pose_msg.pose.pose.orientation.x = quat.array[1];
+      pose_msg.pose.pose.orientation.y = quat.array[2];
+      pose_msg.pose.pose.orientation.z = quat.array[3];
     }
 
     this->pose_pub.publish(pose_msg);
@@ -373,16 +395,22 @@ public:
     // t = rot2d * t;
 
     double dt = (msg->header.stamp.toNSec() - prev_time) / 1e9;
-    float dx = t[1] / dt;
-    float dy = -t[0] / dt;
+    float vx = t[1] / dt;
+    float vy = -t[0] / dt;
 
-    A = (Eigen::MatrixXd(m, n) <<
-      1, 0, 0, dt, 0, 0,
-      0, 1, 0, 0, dt, 0,
-      0, 0, 1, 0, 0, dt,
-      0, 0, 0, 1, 0, 0,
-      0, 0, 0, 0, 1, 0,
-      0, 0, 0, 0, 0, 1
+    // get acceleration
+    FusionVector accel = FusionAhrsGetLinearAcceleration(&this->ahrs);
+    Eigen::Vector3f accel_vec = (Eigen::Vector3f() << accel.axis.x, accel.axis.y, accel.axis.z).finished();
+    accel_vec = rot3d * accel_vec;
+
+    // State transition matrix A for 6-state model (x, y, z, vx, vy, vz)
+    A = (Eigen::MatrixXd(n, n) <<
+      1, 0, 0, dt, 0,  0,
+      0, 1, 0, 0,  dt, 0,
+      0, 0, 1, 0,  0,  dt,
+      0, 0, 0, 1,  0,  0,
+      0, 0, 0, 0,  1,  0,
+      0, 0, 0, 0,  0,  1
     ).finished();
 
     std::cout << "dt: " << dt << ", dx: " << dx << ", dy: " << dy << std::endl;
@@ -393,13 +421,13 @@ public:
     // pose_dt = 0.2;
     if (pose_dt < 0.1) {
       std::cout << "using position" << std::endl;
-      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, dx, dy, 0).finished();
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(n) << this->aruco_pose.x, this->aruco_pose.y, this->aruco_pose.z, vx, vy, 0).finished();
       this->filter.C = this->C;
       this->filter.update(sensor_meas, dt, A);
     }
     else {
       std::cout << "not using position" << std::endl;
-      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(6) << 0, 0, 0, dx, dy, 0).finished();
+      Eigen::VectorXd sensor_meas = (Eigen::VectorXd(n) << 0, 0, 0, vx, vy, 0).finished();
       this->filter.C = this->C_positionless;
       this->filter.update(sensor_meas, dt, A);
     }
