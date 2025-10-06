@@ -27,7 +27,7 @@ include_directories(
 )
 
 # Collect all cpp files in src directory
-file(GLOB SOURCES "src/*.cpp")
+file(GLOB SOURCES "src/*.hpp" "src/*.cpp")
 
 add_executable(main ${SOURCES})
 target_link_libraries(main
