@@ -1,0 +1,36 @@
+{
+    "name": "sonar_ws",
+    "privileged": true,
+    "remoteUser": "${env:USER}",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            "USERNAME": "${env:USER}",
+            "CONTAINER_ID": "sonar_ws"
+        }
+    },
+    "workspaceFolder": "/home/${env:USER}/sonar_ws",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/${env:USER}/sonar_ws,type=bind",
+    "runArgs": [
+        "--net=host",
+        "--pid=host",
+        "--ipc=host",
+        "-e", "DISPLAY=${env:DISPLAY}"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "llvm-vs-code-extensions.vscode-clangd",
+                "ms-vscode.cmake-tools"
+            ]
+        }
+    },
+    "mounts": [
+       "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+       "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached",
+       "type=bind,source=/home/${localEnv:USER}/.ssh,target=/home/${env:USER}/.ssh,readonly",
+       "type=bind,source=/home/${localEnv:USER}/.dotfiles,target=/home/${env:USER}/.dotfiles,readonly",
+       "type=bind,source=/home/${localEnv:USER}/Datasets,target=/home/${env:USER}/datasets"
+    ]
+}

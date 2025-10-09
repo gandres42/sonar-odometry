@@ -1,4 +1,5 @@
 #include "sonar_odom.hpp"
+#include <cstdint>
 
 #define SONAR_MAX_DIST 5
 #define SONAR_BUFFER_LENGTH 3
@@ -14,7 +15,7 @@ SonarOdom::SonarOdom() {
     pose_pub = node.advertise<nav_msgs::Odometry>("/sianat/pose", 1);
 
     // message buffers
-    uint64_t one_second_ago = ros::Time::now().toNSec() - uint64_t(1e9);
+    uint64_t one_second_ago = ros::Time::now().toNSec() - static_cast<uint64_t>(1e9);
     aruco_frame = {0, 0, 0, 0, 0, one_second_ago};
     sonar_frame = {nullptr, one_second_ago};
     imu_frame = {one_second_ago};
@@ -63,18 +64,18 @@ void SonarOdom::imu_cb(const sensor_msgs::Imu::ConstPtr& msg) {
     // update IMU with either magnetometer or aruco as external heading
     if (USE_COMPASS) {
         if (mag_dt <= 0.1) {
-        FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_frame.mag, imu_dt);
+            FusionAhrsUpdate(&this->ahrs, gyro, accel, this->mag_frame.mag, imu_dt);
         }
         else {
-        FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, imu_dt);
+            FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, imu_dt);
         }
     }
     else {
         if (aruco_dt <= 0.1) {
-        FusionAhrsUpdateExternalHeading(&this->ahrs, gyro, accel, this->aruco_frame.yaw_deg, imu_dt);
+            FusionAhrsUpdateExternalHeading(&this->ahrs, gyro, accel, this->aruco_frame.yaw_deg, imu_dt);
         }
         else {
-        FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, imu_dt);
+            FusionAhrsUpdateNoMagnetometer(&this->ahrs, gyro, accel, imu_dt);
         }
     }
     this->imu_frame = {ros::Time::now().toNSec()};
